@@ -1,241 +1,185 @@
-# DCL-pro-F1592
+# DCL-pro-F1592 – Aktualizovaná dokumentace
 
-# Komplexní shrnutí řešení autorizace KFZKZ pro Fiori Asset Worklist
+# Komplexní shrnutí řešení autorizace KFZKZ pro Fiori Asset Worklist (upraveno dle testování a diskuse)
 
-Tento dokument poskytuje **detailní popis** celého řešení autorizace podle hodnoty **KFZKZ** (v systému reprezentované jako *VehicleLicensePlateNumber*), které slouží jako identifikátor **budovy/objektu** vycházejícího z číselníku `ZAM_OBJEKT`.
-
-Je určen:
-- **vývojářům** – aby přesně věděli, jak řešení funguje a jak jej reprodukovat,
-- **business** – aby byla srozumitelně popsána logika, účel a dopady.
+Tento dokument shrnuje **kompletní návrh, implementaci, úpravy a poznatky z testování** autorizace podle hodnoty **KFZKZ** (v datovém modelu jako *VehicleLicensePlateNumber*) u Fiori aplikace **Asset Master Worklist (F1592)**.
 
 ---
 
-# 1. Proč bylo řešení potřeba
+# 1. Důvod úpravy
 
-Standardní SAP aplikace **Asset Master Worklist (F1592)** pracuje s daty z CDS view **`C_FixedAssetWorklist`**.  
-Aplikace nemá zabudované žádné řízení přístupu podle lokace majetku (budovy).
+Standardní aplikace F1592 neumožňuje filtrovat majetek podle objektu/budovy (KFZKZ).  
+Zákazník požaduje:
 
-Zákazník však požaduje:
-
-- Uživatel smí vidět **jen majetek umístěný v objektu(budově)**, na který má oprávnění.  
-- Každý uživatel může mít přístup na více objektů.  
-- Hodnota objektu je uložena v tabulce **`ZAM_OBJEKT`**.  
-- V datovém modelu Fiori aplikace se tato hodnota nachází v poli **`VehicleLicensePlateNumber`**.  
-- Řádky **bez hodnoty** (prázdné KFZKZ) musí být viditelné všem.
-
-Technicky jde o potřebu rozšířit **CDS Access Control**, aniž bychom zasahovali do standardních SAP autorizačních objektů.
+- Každý uživatel smí vidět **pouze majetek v objektech**, na které má oprávnění.
+- Uživatel může mít přiřazeno více objektů.
+- Hodnoty objektů jsou v číselníku `ZAM_OBJEKT`.
+- Hodnota KFZKZ je v datovém modelu dostupná jako **VehicleLicensePlateNumber**.
+- Řádky s prázdným objektem **nemají být vidět**, pokud uživatel **nemá oprávnění i na prázdnou hodnotu** (změna oproti původní verzi).
+- Chování **k datu výkazu (Key Date)** je plně pokryto standardním modelem ANLZ (adatu/bdatu).
 
 ---
 
-# 2. Architektura řešení
+# 2. Jak řešení funguje
 
-Celé řešení stojí na třech prvcích:
+Řešení je založené na kombinaci:
 
-1. **Vlastní autorizační pole** `ZKFZKZ`  
-   – reprezentuje budovu/objekt, na který může být uživatel autorizován.
+1. **Autorizační pole** `ZKFZKZ`
+2. **Autorizační objekt** `Z_OBJ_KFZ`
+3. **PFCG role** (např. `ZAM_FAA_KFZKZ_10000001`)
+4. **Z‑DCL přístupová role** `ZR_FAA_KFZKZ`
 
-2. **Vlastní autorizační objekt** `Z_OBJ_KFZ`  
-   – umožňuje přes PFCG definovat oprávnění pro jednotlivé objekty.
+DCL se vyhodnocuje **společně** se standardním SAP DCL → výsledkem je průnik (AND).
 
-3. **Vlastní CDS DCL role** `ZR_FAA_KFZKZ`  
-   – zapojuje autorizaci do CDS view `C_FixedAssetWorklist`  
-     (rozšiřuje standardní kontroly SAP o námi definovaný filtr).
-
-4. **Role v PFCG** (např. `ZAM_FAA_KFZKZ_10000001`)  
-   – obsahuje povolené hodnoty KFZKZ a tím určuje, které objekty smí uživatel vidět.
-
-Toto řešení:
-- je **plně upgrade‑safe**,  
-- **bez zásahu do standardních SAP objektů**,  
-- **čistě konfigurační/data-driven**,  
-- funguje automaticky v OData v2 i v2 UI5 aplikacích.
+To znamená:
+- Standardní oprávnění (např. ANLKL, KOSTL, GSBER) zůstávají platná.
+- Naše Z‑DCL přidává další filtr – **KFZKZ**.
 
 ---
 
 # 3. Tvorba autorizačního pole `ZKFZKZ` (SU20)
 
-Autorizační pole musí existovat ještě předtím, než jej lze použít v autorizačním objektu. Pole je založeno na datovém elementu, který odpovídá skutečnému datovému typu KFZKZ – tedy identifikátoru budovy.
+Pole je potřeba, aby jej bylo možné používat v SU21 a PFCG.
 
-### Postup krok za krokem:
+## 3.1 SE11 – využití existující domény `AM_KFZKZ`
 
-## 3.1 SE11 – využití domény `AM_KFZKZ`
-Účel domény:
-- definovat technické vlastnosti pole,
-- zajistit F4 nápovědu přes Value Table.
+- Typ: `CHAR`
+- Délka: 15
+- Value Table: `ZAM_OBJEKT`
 
-**Kroky:**
-1. `SE11` → Domain → Create  
-2. Název: **`AM_KFZKZ`**
-3. Typ: `CHAR`
-4. Délka: dle délky objektu v `ZAM_OBJEKT` (15)
-5. **Value Table:** `ZAM_OBJEKT`  
-   → díky tomu získá pole F4 nápovědu v PFCG
-6. Texty doplnit
-7. Activate
+## 3.2 SE11 – vytvoření Data Elementu
 
----
+- Název: `AM_KFZKZZ`
+- Doména: `AM_KFZKZ`
+- Popisky: „Objekt“, „KFZKZ“
 
-## 3.2 SE11 – převzetí Data Elementu `AM_KFZKZ`
-Účel DE:
-- pojmenování pole,
-- připojení search-help,
-- použije se v SU20.
+## 3.3 SU20 – creation of authorization field
 
-**Kroky:**
-1. `SE11` → Data Element → Create  
-2. Název: **`AM_KFZKZZ`**
-3. Doména: `AM_KFZKZ`
-4. Popisky: „Objekt“, „Kód objektu (KFZKZ)“ apod.
-5. Activate
+- Název: **`ZKFZKZ`**
+- Data element: `AM_KFZKZ`
+- Organizational level: **NE**
 
 ---
 
-## 3.3 SU20 – vytvoření autorizačního pole `ZKFZKZ`
-Účel:
-- SAP použije toto pole v rámci SU21 objektu i v PFCG.
+# 4. Autorizační objekt `Z_OBJ_KFZ` (SU21)
 
-**Kroky:**
-1. `SU20` → Create Authorization Field  
-2. Název: **`ZKFZKZ`**
-3. Data element: **`AM_KFZKZ`**
-4. Organizational Level: NE
-5. Uložit + Generate
+Umožňuje určovat přístup uživatele ke konkrétním objektům.
 
----
-
-# 4. Tvorba autorizačního objektu `Z_OBJ_KFZ` (SU21)
-
-Tento objekt umožní definovat přístup na úrovni jednotlivých budov/objektů.
-
-### Co objekt řeší:
-- uživatel má přístup k jedné nebo více hodnotám KFZKZ,
-- tyto hodnoty se spravují v PFCG,
-- bude volán z CDS Access Control přes `pfcg_auth()`.
-
-### Postup:
-
-1. `SU21` → Create Authorization Object  
-2. Název: **`Z_OBJ_KFZ`**
-3. Authorization Fields:
-   - `ACTVT` (standardní pole, hodnoty jako 03 = Display)
-   - `ZKFZKZ` (námi vytvořené pole)
-4. Dokumentace: popsat, že jde o řízení přístupu k majetku podle objektu.
-5. Save & Generate
+- Název: **`Z_OBJ_KFZ`**
+- Pole:
+  - `ACTVT`
+  - `ZKFZKZ`
+- Použití: v DCL přes `aspect pfcg_auth()`
 
 ---
 
-# 5. Tvorba PFCG role `ZAM_FAA_KFZKZ_10000001`
+# 5. Role `ZAM_FAA_KFZKZ_10000001` (PFCG)
 
-Tato role reprezentuje **konkrétní budovu/objekt** a obsahuje povolené hodnoty v našem novém autorizačním objektu.
+Role reprezentuje přístup na jeden konkrétní objekt.
 
-### Účel role:
-- řídit, které budovy může uživatel vidět v Asset Worklistu,
-- oddělit oprávnění dle jednotlivých poboček/okresů,
-- umožnit jednoduché přiřazení uživateli.
-
-### Postup:
-
-1. `PFCG` → Create Role  
-2. Název: **`ZAM_FAA_KFZKZ_10000001`**
-3. Režim *Authorizations*:
-   - kliknout **Change Authorization Data**
-   - najít objekt **`Z_OBJ_KFZ`**
-   - nastavit:
-     - `ACTVT` = **03**
-     - `ZKFZKZ` = **10000001**  
-       (hodnota objektu z tabulky `ZAM_OBJEKT`)  
-4. Generate
-5. Uložit
-6. Přiřadit testovacímu uživateli
-
-Tuto logiku lze zopakovat pro dalších ~100 objektů (pokud budou spravovány jako samostatné role).
+Typické vyplnění:
+- Objekt: `Z_OBJ_KFZ`
+  - `ACTVT` = 03
+  - `ZKFZKZ` = 10000001
+- Role se přiřadí uživateli.
+- Je možné založit více rolí – pro každý objekt jednu.
 
 ---
 
-# 6. Tvorba CDS Access Control (DCL) `ZR_FAA_KFZKZ`
+# 6. CDS Access Control `ZR_FAA_KFZKZ` – AKTUALIZOVANÁ VERZE
 
-Toto je nejdůležitější část řešení – **zavádí vlastní filtr do zobrazení dat**.
+Na základě diskuze s business:
+- **prázdné KFZKZ se NEMAJÍ zobrazovat** (původně se zobrazovat měly),
+- zobrazí se pouze tehdy, **pokud má role povoleno i KFZKZ = ''**.
 
-### Proč je potřeba:
-- Standardní CDS Access Control u view `C_FixedAssetWorklist` kontroluje jen standardní SAP autorizační objekty.
-- Potřebujeme dodat **další podmínku**, která zajišťuje filtr nad KFZKZ.
-- Přitom standardní DCL **musí zůstat beze změny**.
-
-Vlastní DCL role **se vyhodnocuje společně se standardem (AND)**, což je ideální chování.
-
-### DCL soubor:
+### Platná verze DCL:
 
 ```abap
-@EndUserText.label: 'Extra access: KFZKZ filter for C_FixedAssetWorklist'
+@EndUserText.label: 'KFZKZ filter for C_FixedAssetWorklist'
 @MappingRole: true
 define role ZR_FAA_KFZKZ {
 
   grant select on C_FixedAssetWorklist
     where
-      // Prázdné hodnoty jsou viditelné všem uživatelům
-      VehicleLicensePlateNumber is null
-      or VehicleLicensePlateNumber = ''
-
-      // Jinak se vyhodnocuje oprávnění podle PFCG role
-      or ( VehicleLicensePlateNumber ) =
+      // uživatel musí mít výslovné oprávnění na hodnotu VehicleLicensePlateNumber
+      ( VehicleLicensePlateNumber ) =
            aspect pfcg_auth( Z_OBJ_KFZ, ZKFZKZ, ACTVT = '03' );
 }
 ```
 
-### Co přesně dělá:
-
-1. Pokud je `VehicleLicensePlateNumber` prázdné → záznam projde.  
-2. Pokud má hodnotu → DCL ověří, zda má uživatel v rolích PFCG povolenu tuto hodnotu v `Z_OBJ_KFZ`.  
-3. Pokud ano → záznam projde.  
-4. Pokud ne → záznam se **odfiltruje**.
+### Změna:
+- Varianta „prázdné vidí všichni“ byla odstraněna.
+- Pokud je hodnota prázdná → zobrazí se pouze tehdy, pokud PFCG role **explicitně** obsahuje prázdnou hodnotu.
 
 ---
 
-# 7. Přístupová logika – shrnutí pro business
+# 7. Chování na DEV/DF2 (poznatek z testování)
 
-- Každý majetek má přiřazenou **budovu/objekt** (KFZKZ).  
-- Každý uživatel má přiřazené **jedno nebo více oprávnění** na konkrétní objekty.  
-- Ve Fiori aplikaci uvidí uživatel **pouze majetek**, který se nachází v objektech, na které má oprávnění.  
-- Majetek bez přiřazené budovy (KFZKZ prázdné) je viditelný všem.  
-- Logika funguje automaticky ve všech prostředích.
+Na vývojových systémech DF2/DEV běžně platí:
 
----
+- Vývojáři mají typicky **široká oprávnění**, často i nepřímo:
+  - SAP_ALL
+  - S_DEVELOP
+  - super-role pro FE integraci
+  - fallback roles z template
+- I když není explicitně přiřazena role Z_OBJ_KFZ, může být oprávnění splněno přes:
+  - široké FI-AA role,
+  - generické AM/FI role,
+  - fallback objekt ANLKL/BUKRS, přes který projdou i další kontroly.
 
-# 8. Kompletní end-to-end tok
+Proto se může stát, že vývojář **vidí všechny záznamy**, i když nemá „viditelné“ Z‑role.
 
-1. Majetek v SAP má hodnotu KFZKZ → ta se propsala do `VehicleLicensePlateNumber`.  
-2. Uživatel má v PFCG přiřazenou roli (např. `ZAM_FAA_KFZKZ_10000001`).  
-3. Tato role mu povoluje vidět objekt **10000001**.  
-4. Otevře Fiori aplikaci → UI5 volá CDS/OData.  
-5. CDS Access Control:
-   - vyhodnotí standardní SAP role,  
-   - vyhodnotí naši Z‑DCL,  
-   - povolí pouze záznamy s KFZKZ = 10000001 nebo prázdné.  
-6. Uživatel uvidí jen relevantní data.
+**Doporučení:**  
+Test vždy provádět přes **testovací účet** bez developerských rolí.
 
 ---
 
-# 9. Výhody řešení
+# 8. Chování k datu výkazu (Key Date)
 
-- Bez zásahu do standardního kódu SAP.  
-- Pouze konfigurace (SU20, SU21, PFCG) + CDS DCL.  
-- Jasné řízení přístupu na úrovni „lokací majetku“.  
-- Možnost udržet až stovky kombinací přes jednoduché role.  
-- Přenositelné mezi systémy (transport).  
-- Škálovatelné pro další business jednotky.
+Nyní potvrzeno:
 
----
+- KFZKZ je uloženo v tabulce **ANLZ** včetně časové platnosti `ADATU` a `BDATU`.
+- CDS `C_FixedAssetWorklist` využívá parametr **P_KeyDate**.
+- Tím se automaticky filtruje:
+  - platnost záznamů,
+  - historická data,
+  - změny KFZKZ v čase.
 
-# 10. Doporučení do budoucna
-
-- Hodnoty v `ZAM_OBJEKT` udržovat konzistentně (bez duplicit).  
-- Pro větší objemy (např. 300+ objektů) zvážit semi‑automatizovanou tvorbu rolí.  
-- Pokud by se někdy řešilo „k datu výkazu“, lze rozšířit o časově platnou tabulku (časová varianta DCL).
+**DCL časovou platnost neřeší**, řeší ji datový model.
 
 ---
 
-# 11. Závěr
+# 9. „Záhadné záznamy navíc“ (DU5)
 
-Celé řešení umožňuje přesné řízení přístupu k majetku na úrovni budov/objektů, je implementačně nenáročné, čisté, bezpečné a dobře udržovatelné.  
-Pro business znamená zásadní snížení rizika nežádoucího přístupu a správné rozdělení zodpovědností.
+- Na DU5 se objevuje 8 záznamů navíc.
+- Data na DU5 jsou neúplná / nečistá.
+- Analýza se provede až na DU4 (kopie produkce).
+- Vedeno jako **TODO**.
 
+---
+
+# 10. End‑to‑end tok
+
+1. Fiori předá P_KeyDate.
+2. CDS vyfiltruje majetek podle ANLZ k danému dni.
+3. Standardní DCL aplikuje FI-AA oprávnění.
+4. Z‑DCL aplikuje filtr podle KFZKZ.
+5. Pokud KFZKZ není v roli → záznam se skryje.
+6. Pokud je KFZKZ prázdné → zobrazí se jen při oprávnění na prázdnou hodnotu.
+
+---
+
+# 11. Shrnutí pro business
+
+- Uživatel vidí **pouze majetek v objektech**, na které má roli.
+- Prázdné KFZKZ se nezobrazují.
+- Historie je podporována automaticky (ANLZ).
+- Řešení je čisté, udržovatelné a bezpečné.
+- Test je nutné provádět na ne‑developerských účtech.
+
+---
+
+# 12. Závěr
+
+Řešení je plně funkční a sladěné s požadavky zákazníka.  
+Dalším krokem je ověření na DU4 nad produkčními daty.
