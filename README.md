@@ -1,12 +1,227 @@
-# DCL-pro-F1592 – Aktualizovaná dokumentace
+[[_TOC_]]   
 
-# Komplexní shrnutí řešení autorizace KFZKZ pro Fiori Asset Worklist (upraveno dle testování a diskuse)
+# V2
+
+## DCL-pro-F1592 – Aktualizovaná dokumentace (včetně změny s REDEFINITION)
+
+## Komplexní shrnutí řešení autorizace KFZKZ pro Fiori Asset Worklist
+Tento dokument shrnuje **kompletní návrh, implementaci, změny, problémové chování a konečné řešení** autorizace podle hodnoty **KFZKZ** (v datovém modelu *VehicleLicensePlateNumber*) u Fiori aplikace **Asset Master Worklist (F1592)**.
+
+---
+
+## 1. Důvod úpravy
+
+Standardní aplikace F1592 nedokáže filtrovat majetek podle objektu/budovy (KFZKZ).  
+Zákazník však požaduje:
+
+- Uživatel smí vidět **pouze majetek umístěný v objektech**, na které má oprávnění.  
+- Uživatel může mít více objektů přiřazených.  
+- KFZKZ pochází z číselníku `ZAM_OBJEKT`.  
+- Prázdné hodnoty KFZKZ **nemají být vidět**, pokud nejsou výslovně povoleny.  
+- Historický pohled přes Key Date je řešen již standardní logikou tabulky ANLZ (ADATU/BDATU).
+
+---
+
+## 2. Architektura řešení
+
+Finální řešení se skládá z:
+
+1. **Autorizační pole** `ZKFZKZ`  
+2. **Autorizační objekt** `Z_OBJ_KFZ`  
+3. **PFCG role** s povolenými objekty (např. `ZAM_FAA_KFZKZ_10000001`)  
+4. **Z-DCL role** `ZR_FAA_KFZKZ`  
+5. **Standardní SAP DCL** na `C_FixedAssetWorklist`
+
+#### Klíčová zjištění
+- Standardní a vlastní DCL se **kombinují logikou AND**, nikoliv OR.  
+- Naše původní představa byla, že Z-DCL „ořezává“ výsledek standardního DCL.  
+- Realita: pokud standardní DCL „pustí” záznam, dostane se do výstupu **ještě před KFZKZ**, a tím obejde náš filtr (pokud jsou splněna standardní oprávnění).
+
+**To vysvětluje, proč uživatel viděl více záznamů (např. WERKS = 4800), i když KFZKZ ≠ 48000001.**
+
+---
+
+## 3. Finální řešení pomocí REDEFINITION
+
+### 3.1 Problém
+Standardní DCL poskytoval přístup na základě těchto objektů:
+
+- A_S_ANLKL (třída majetku + společnost)  
+- A_S_GSBER (obchodní úsek)  
+- A_S_KOSTL (nákladové středisko)  
+- A_S_WERK (závod)
+
+Uživatel tak reálně splnil standardní DCL → a KFZKZ filtr se tím vůbec neaplikoval.
+
+### 3.2 Řešení
+Zavedli jsme:
+
+#### 🔥 **REDEFINITION** DCL role
+
+Pomocí klíčového slova:
+
+```
+REDEFINITION
+```
+
+se naše Z‑DCL stává **nahrazením** (override) standardního SAP DCL.  
+To znamená:
+
+- Standardní DCL se ignoruje  
+- Pouze naše Z-DCL se vyhodnocuje  
+- ALE → do Z-DCL jsme ručně překopírovali i standardní podmínky  
+- Výsledek je kombinace „standardní logika AND KFZKZ filtr“
+
+### 3.3 Výsledek
+- Standardní přístupová logika FI‑AA zůstala zachována  
+- Navíc se aplikuje náš **povinný filtr KFZKZ**  
+- **Uživatel nyní vidí pouze majetek v konkrétním KFZKZ**  
+- Záznamy pro WERKS 4800 již neprojdou, pokud KFZKZ ≠ 48000001  
+
+---
+
+## 4. Autorizační pole `ZKFZKZ` (SU20)
+
+- Typ: CHAR 15  
+- Doména: `AM_KFZKZ`  
+- Data element: `AM_KFZKZZ`  
+- Neorganizational level  
+- Používá se v objektu SU21
+
+---
+
+## 5. Autorizační objekt `Z_OBJ_KFZ` (SU21)
+
+| Pole | Význam |
+|------|--------|
+| ACTVT | 03 = Display |
+| ZKFZKZ | Hodnota KFZKZ |
+
+Objekt je volán přes `aspect pfcg_auth()` v DCL.
+
+---
+
+## 6. PFCG role
+
+Příklad: `ZAM_FAA_KFZKZ_48000001`
+
+- `Z_OBJ_KFZ`  
+  - ACTVT = 03  
+  - ZKFZKZ = 48000001  
+
+Poznámka:  
+Z derivované role (např. Z3AA91_00) se nepřenáší *hodnota*, pouze struktura.  
+Hodnoty jsou definované až v konkrétní odvozené roli.
+
+---
+
+## 7. Finální Z‑DCL `ZR_FAA_KFZKZ` (s REDEFINITION)
+
+```abap
+@EndUserText.label: 'KFZKZ + Standard FI-AA Access Control for C_FixedAssetWorklist'
+@MappingRole: true
+define role ZR_FAA_KFZKZ
+    REDEFINITION {
+
+  grant select on C_FixedAssetWorklist
+    where
+
+      // 1) Standardní FI-AA logika (zkopírováno ze SAP standardu):
+
+      ( AssetClass, CompanyCode ) =
+          aspect pfcg_auth ( A_S_ANLKL, ANLKL, BUKRS, ACTVT = '03' )
+
+      and ( ( CompanyCode, AssetBusinessArea ) =
+          aspect pfcg_auth ( A_S_GSBER, BUKRS, GSBER )
+            or AssetBusinessArea = '' )
+
+      and ( ( CompanyCode, AssetCostCenter ) =
+          aspect pfcg_auth ( A_S_KOSTL, BUKRS, KOSTL )
+            or AssetCostCenter = '' )
+
+      and ( ( CompanyCode, Plant ) =
+          aspect pfcg_auth ( A_S_WERK, BUKRS, WERKS )
+            or Plant = '' )
+
+      // 2) Dodatečný filtr KFZKZ:
+
+      and ( VehicleLicensePlateNumber ) =
+            aspect pfcg_auth( Z_OBJ_KFZ, ZKFZKZ, ACTVT = '03' );
+
+}
+```
+
+### Co se tím dosáhne:
+- REDEFINITION „vypne“ standardní DCL  
+- My ho „vracíme zpět“ ručním překopírováním  
+- A zároveň doplňujeme náš filtr  
+- Výsledkem je čisté chování typu:
+
+```
+(Standard FI-AA oprávnění) AND (KFZKZ)
+```
+
+---
+
+## 8. Chování po úpravě na testu (validace)
+
+#### Výchozí stav:
+- 550 000 celkových záznamů
+- Uživatel před úpravou viděl 37 000 (WERKS filtr)
+
+#### Po úpravě:
+- Už vidí **pouze majetek s KFZKZ = 48000001**
+- Počet odpovídá skutečnosti (~7454 záznamů)
+- Chování plně odpovídá očekávání businessu
+
+---
+
+## 9. Chování k historickým datům (Key Date)
+
+Funguje kompletně standardně díky:
+- ANLZ.ADTTU
+- ANLZ.BDATU
+- Propagaci parametru `P_KeyDate` z view
+
+Žádná speciální logika v DCL není potřeba.
+
+---
+
+## 10. Shrnutí pro business
+
+- Uživatel vidí majetek **pouze tam, kde má KFZKZ oprávnění**  
+- Standardní FI-AA omezení se stále uplatňují  
+- Prázdné KFZKZ se nezobrazují  
+- Chování je čisté, auditovatelné, bezpečné  
+- Historické řezy přes Key Date jsou podporovány automaticky  
+- Chování na testu ověřeno (výsledně 7454 záznamů)
+
+---
+
+## 11. Závěr
+
+Finalizované řešení využívá:
+
+- vlastní autorizační objekt  
+- vlastní DCL s REDEFINITION  
+- ručně vložené standardní FI-AA podmínky  
+- povinný filtr KFZKZ  
+
+Výsledkem je přesné a stabilní řízení přístupu podle objektů (KFZKZ), plně v souladu s požadavky zákazníka.
+
+
+
+# V1
+
+## DCL-pro-F1592 – Aktualizovaná dokumentace
+
+## Komplexní shrnutí řešení autorizace KFZKZ pro Fiori Asset Worklist (upraveno dle testování a diskuse)
 
 Tento dokument shrnuje **kompletní návrh, implementaci, úpravy a poznatky z testování** autorizace podle hodnoty **KFZKZ** (v datovém modelu jako *VehicleLicensePlateNumber*) u Fiori aplikace **Asset Master Worklist (F1592)**.
 
 ---
 
-# 1. Důvod úpravy
+## 1. Důvod úpravy
 
 Standardní aplikace F1592 neumožňuje filtrovat majetek podle objektu/budovy (KFZKZ).  
 Zákazník požaduje:
@@ -20,7 +235,7 @@ Zákazník požaduje:
 
 ---
 
-# 2. Jak řešení funguje
+## 2. Jak řešení funguje
 
 Řešení je založené na kombinaci:
 
@@ -37,23 +252,23 @@ To znamená:
 
 ---
 
-# 3. Tvorba autorizačního pole `ZKFZKZ` (SU20)
+## 3. Tvorba autorizačního pole `ZKFZKZ` (SU20)
 
 Pole je potřeba, aby jej bylo možné používat v SU21 a PFCG.
 
-## 3.1 SE11 – využití existující domény `AM_KFZKZ`
+### 3.1 SE11 – využití existující domény `AM_KFZKZ`
 
 - Typ: `CHAR`
 - Délka: 15
 - Value Table: `ZAM_OBJEKT`
 
-## 3.2 SE11 – vytvoření Data Elementu
+### 3.2 SE11 – vytvoření Data Elementu
 
 - Název: `AM_KFZKZZ`
 - Doména: `AM_KFZKZ`
 - Popisky: „Objekt“, „KFZKZ“
 
-## 3.3 SU20 – creation of authorization field
+### 3.3 SU20 – creation of authorization field
 
 - Název: **`ZKFZKZ`**
 - Data element: `AM_KFZKZ`
@@ -61,7 +276,7 @@ Pole je potřeba, aby jej bylo možné používat v SU21 a PFCG.
 
 ---
 
-# 4. Autorizační objekt `Z_OBJ_KFZ` (SU21)
+## 4. Autorizační objekt `Z_OBJ_KFZ` (SU21)
 
 Umožňuje určovat přístup uživatele ke konkrétním objektům.
 
@@ -73,7 +288,7 @@ Umožňuje určovat přístup uživatele ke konkrétním objektům.
 
 ---
 
-# 5. Role `ZAM_FAA_KFZKZ_10000001` (PFCG)
+## 5. Role `ZAM_FAA_KFZKZ_10000001` (PFCG)
 
 Role reprezentuje přístup na jeden konkrétní objekt.
 
@@ -86,13 +301,13 @@ Typické vyplnění:
 
 ---
 
-# 6. CDS Access Control `ZR_FAA_KFZKZ` – AKTUALIZOVANÁ VERZE
+## 6. CDS Access Control `ZR_FAA_KFZKZ` – AKTUALIZOVANÁ VERZE
 
 Na základě diskuze s business:
 - **prázdné KFZKZ se NEMAJÍ zobrazovat** (původně se zobrazovat měly),
 - zobrazí se pouze tehdy, **pokud má role povoleno i KFZKZ = ''**.
 
-### Platná verze DCL:
+#### Platná verze DCL:
 
 ```abap
 @EndUserText.label: 'KFZKZ filter for C_FixedAssetWorklist'
@@ -107,13 +322,13 @@ define role ZR_FAA_KFZKZ {
 }
 ```
 
-### Změna:
+#### Změna:
 - Varianta „prázdné vidí všichni“ byla odstraněna.
 - Pokud je hodnota prázdná → zobrazí se pouze tehdy, pokud PFCG role **explicitně** obsahuje prázdnou hodnotu.
 
 ---
 
-# 7. Chování na DEV/DF2 (poznatek z testování)
+## 7. Chování na DEV/DF2 (poznatek z testování)
 
 Na vývojových systémech DF2/DEV běžně platí:
 
@@ -134,7 +349,7 @@ Test vždy provádět přes **testovací účet** bez developerských rolí.
 
 ---
 
-# 8. Chování k datu výkazu (Key Date)
+## 8. Chování k datu výkazu (Key Date)
 
 Nyní potvrzeno:
 
@@ -149,7 +364,7 @@ Nyní potvrzeno:
 
 ---
 
-# 9. „Záhadné záznamy navíc“ (DU5)
+## 9. „Záhadné záznamy navíc“ (DU5)
 
 - Na DU5 se objevuje 8 záznamů navíc.
 - Data na DU5 jsou neúplná / nečistá.
@@ -158,7 +373,7 @@ Nyní potvrzeno:
 
 ---
 
-# 10. End‑to‑end tok
+## 10. End‑to‑end tok
 
 1. Fiori předá P_KeyDate.
 2. CDS vyfiltruje majetek podle ANLZ k danému dni.
@@ -169,7 +384,7 @@ Nyní potvrzeno:
 
 ---
 
-# 11. Shrnutí pro business
+## 11. Shrnutí pro business
 
 - Uživatel vidí **pouze majetek v objektech**, na které má roli.
 - Prázdné KFZKZ se nezobrazují.
@@ -179,7 +394,7 @@ Nyní potvrzeno:
 
 ---
 
-# 12. Závěr
+## 12. Závěr
 
 Řešení je plně funkční a sladěné s požadavky zákazníka.  
 Dalším krokem je ověření na DU4 nad produkčními daty.
